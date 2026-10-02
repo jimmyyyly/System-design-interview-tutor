@@ -583,19 +583,34 @@ export class OfflineTutor implements TutorEngine {
       const targets = detectComponents(sentence)
         .map((det) => d().components.find((c) => c.id === det.id) ?? ofKind(det.kind)[0])
         .filter((c): c is Component => !!c);
-      const replicaM = sentence.match(
-        /(?:(\d+)\s*(?:[a-z-]+\s+)?(?:read\s+)?(?:replicas?|instances?|nodes?|servers?|copies))|\b(replicat\w*|replicas?|multi-?az|failover|standby|autoscal\w*|horizontal\w*|redundan\w*)\b/i,
-      );
-      if (replicaM) {
-        const n = replicaM[1] ? parseInt(replicaM[1], 10) : 3;
-        const tgts = targets.length ? targets : ofKind("database");
-        for (const t of tgts) {
-          if (t.kind === "client") continue;
-          if ((t.replicas ?? 1) !== n && n >= 1 && n <= 1024) {
-            apply({ op: "update_component", id: t.id, patch: { replicas: n } });
-            notes.push(`${t.label} x${n}`);
-          }
-        }
+      // Each count ("30 app servers", "Postgres with 3 read replicas") goes to the component it describes:
+      // the mention it overlaps, else the nearest one before it, else the nearest one after.
+      const mentioned = this.mentions(sentence, d().components);
+      const nearest = (start: number, end: number) =>
+        mentioned.find((m) => m.start < end && m.end > start)?.c ??
+        mentioned.filter((m) => m.end <= start).at(-1)?.c ??
+        mentioned.find((m) => m.start >= end)?.c ??
+        ofKind("database")[0];
+      const counted = new Set<string>();
+      const setReplicas = (t: Component | undefined, n: number) => {
+        if (!t || t.kind === "client" || n < 1 || n > 1024 || (t.replicas ?? 1) === n) return;
+        apply({ op: "update_component", id: t.id, patch: { replicas: n } });
+        notes.push(`${t.label} x${n}`);
+      };
+      for (const m of sentence.matchAll(
+        /(\d+)\s*(?:[a-z-]+\s+)?(?:read\s+)?(?:replicas?|instances?|nodes?|servers?|copies)\b/gi,
+      )) {
+        const t = nearest(m.index, m.index + m[0].length);
+        if (t) counted.add(t.id);
+        setReplicas(t, parseInt(m[1]!, 10));
+      }
+      // Redundancy words without a number default to 3, without downgrading a larger count.
+      for (const m of sentence.matchAll(
+        /\b(replicat\w*|replicas?|multi-?az|failover|standby|autoscal\w*|horizontal\w*|redundan\w*)\b/gi,
+      )) {
+        const t = nearest(m.index, m.index + m[0].length);
+        if (t && !counted.has(t.id) && (t.replicas ?? 1) < 3) setReplicas(t, 3);
+        if (t) counted.add(t.id);
       }
       const shardM = sentence.match(
         /\b(?:shard\w*|partition\w*)\b(?:[^.]*?\b(?:into|across)\s+(\d+))?(?:[^.]*?\bby\s+([\w-]+(?:\s+[\w-]+)?))?/i,
@@ -617,6 +632,21 @@ export class OfflineTutor implements TutorEngine {
       }
     }
     return notes;
+  }
+
+  /** Positions of component mentions in `text`, resolved to components already on the board. */
+  private mentions(text: string, components: Component[]): { c: Component; start: number; end: number }[] {
+    const out: { c: Component; start: number; end: number }[] = [];
+    for (const { re, make } of DETECTORS) {
+      for (const m of text.matchAll(new RegExp(re.source, "gi"))) {
+        const det = make(m);
+        const c = components.find((x) => x.id === det.id) ?? components.find((x) => x.kind === det.kind);
+        const start = m.index;
+        const end = start + m[0].length;
+        if (c && !out.some((o) => o.start < end && o.end > start)) out.push({ c, start, end });
+      }
+    }
+    return out.sort((a, b) => a.start - b.start);
   }
 
   /** Connect components along conventional request/data paths, without duplicating edges. */

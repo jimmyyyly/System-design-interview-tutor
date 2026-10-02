@@ -85,6 +85,22 @@ describe("OfflineTutor", () => {
     expect(resolved.length).toBeGreaterThanOrEqual(1);
   });
 
+  it("applies each count in a sentence to the component it describes", async () => {
+    const s = new Session("Design a URL shortener", "offline");
+    const t = new OfflineTutor();
+    for (const m of [null, "shorten and redirect", "100M DAU, 40k reads/s, 400 writes/s"]) await run(s, t, m);
+    await run(
+      s,
+      t,
+      "Clients hit an nginx load balancer in front of 30 app servers backed by PostgreSQL with 3 read replicas and failover.",
+    );
+    const replicas = Object.fromEntries(s.design.components.map((c) => [c.id, c.replicas ?? 1]));
+    expect(replicas).toEqual({ client: 1, lb: 1, app: 30, db: 3 });
+    // A redundancy word without a number doesn't shrink a larger count.
+    await run(s, t, "The app servers autoscale.");
+    expect(s.design.components.find((c) => c.id === "app")!.replicas).toBe(30);
+  });
+
   it("gives a hint for the open challenge", async () => {
     const s = new Session("Design a URL shortener", "offline");
     const t = new OfflineTutor();
